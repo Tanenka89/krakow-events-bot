@@ -1,0 +1,29 @@
+name: Daily Krakow Events
+
+on:
+  schedule:
+    # Запуск каждый день в 09:00 UTC (в Польше это 10:00 или 11:00)
+    - cron: '0 9 * * *'
+  workflow_dispatch: # Позволяет запустить вручную для теста
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python bot.py
