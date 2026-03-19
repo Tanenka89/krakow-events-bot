@@ -3,7 +3,7 @@ from bs4 import BeautifulSoup
 import os
 from datetime import datetime, timedelta
 import re
-import time
+from urllib.parse import quote
 
 # --- КОНФИГУРАЦИЯ ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -14,128 +14,101 @@ def log(msg):
     print(f"[LOG] {msg}")
 
 # =============================================================================
-# ИСТОЧНИК 1: KARNET.KRAKOWCULTURE.PL (улучшенная версия)
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# =============================================================================
+def get_day_of_week(date_str):
+    """Возвращает день недели на русском для даты в формате DD.MM.YYYY"""
+    days_ru = {
+        'Monday': 'понедельник',
+        'Tuesday': 'вторник',
+        'Wednesday': 'среда',
+        'Thursday': 'четверг',
+        'Friday': 'пятница',
+        'Saturday': 'суббота',
+        'Sunday': 'воскресенье'
+    }
+    try:
+        if '.' in date_str:
+            date_obj = datetime.strptime(date_str.split()[0], '%d.%m.%Y')
+        else:
+            return ''
+        day_en = date_obj.strftime('%A')
+        return days_ru.get(day_en, '')
+    except:
+        return ''
+
+def make_google_maps_link(address):
+    """Создаёт ссылку на Google Maps для адреса"""
+    if not address or address == '📍 Krakow' or address == 'Онлайн':
+        return None
+    # Очищаем адрес от лишних символов
+    clean_addr = re.sub(r'^📍\s*', '', address).strip()
+    if len(clean_addr) < 5:
+        return None
+    query = f"{clean_addr}, Krakow, Poland"
+    return f"https://www.google.com/maps/search/?api=1&query={quote(query)}"
+
+def parse_date_for_sorting(date_str):
+    """Извлекает дату для сортировки из строки вида '20.03.2026 17:00'"""
+    try:
+        if 'Дата уточняется' in date_str:
+            return datetime.max
+        date_part = date_str.split()[0]
+        return datetime.strptime(date_part, '%d.%m.%Y')
+    except:
+        return datetime.max
+
+# =============================================================================
+# ИСТОЧНИК 1: KARNET.KRAKOWCULTURE.PL (с картинками)
 # =============================================================================
 def get_karnet_events():
-    """Парсит бесплатные события с karnet.krakowculture.pl"""
+    """Парсит бесплатные события с karnet.krakowculture.pl с изображениями"""
     events = []
+    today = datetime.now().date()
     
-    # Прямая ссылка на фильтр бесплатных событий
     url = "https://karnet.krakowculture.pl/wydarzenia"
-    params = {
-        'Param[p_12]': '1',  # Фильтр: бесплатные события
-        'radius': '1000',
-    }
+    params = {'Param[p_12]': '1', 'radius': '1000'}
     
-    # Заголовки, максимально похожие на реальный браузер
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0',
     }
     
     session = requests.Session()
     session.headers.update(headers)
     
     try:
-        log("📡 [karnet.krakowculture.pl] Запрос...")
-        
-        # Пробуем несколько раз с паузой (защита от временных блокировок)
-        for attempt in range(3):
-            try:
-                response = session.get(url, params=params, timeout=30)
-                log(f"📡 [karnet] Попытка {attempt + 1}: статус {response.status_code}")
-                
-                if response.status_code == 200:
-                    break
-                elif response.status_code == 403:
-                    log("⚠️ [karnet] Доступ запрещён (403), пробуем снова...")
-                    time.sleep(2)
-                elif response.status_code >= 500:
-                    log("⚠️ [karnet] Ошибка сервера, пробуем снова...")
-                    time.sleep(2)
-                else:
-                    log(f"⚠️ [karnet] Неожиданный статус: {response.status_code}")
-                    time.sleep(1)
-                    
-            except requests.exceptions.Timeout:
-                log(f"⚠️ [karnet] Тайм-аут, попытка {attempt + 1}")
-                time.sleep(2)
-            except requests.exceptions.ConnectionError:
-                log(f"⚠️ [karnet] Ошибка соединения, попытка {attempt + 1}")
-                time.sleep(2)
-        else:
-            log("❌ [karnet] Все попытки исчерпаны")
-            return events
+        log("📡 [karnet] Запрос...")
+        response = session.get(url, params=params, timeout=30)
         
         if response.status_code != 200:
-            log(f"❌ [karnet] Не удалось загрузить страницу: {response.status_code}")
+            log(f"❌ [karnet] Статус {response.status_code}")
             return events
         
         soup = BeautifulSoup(response.text, 'html.parser')
         log("✅ [karnet] Страница загружена")
         
-        # Ищем карточки событий - пробуем разные селекторы
-        selectors = [
-            ('div', 'event-item'),
-            ('div', 'event'),
-            ('article', None),
-            ('div', 'card'),
-            ('div', 'box'),
-            ('li', None),
-        ]
+        # Ищем карточки событий
+        cards = soup.find_all('div', class_='event-item') or soup.find_all('article') or soup.find_all('div', class_='card')
         
-        event_cards = None
-        for tag, cls in selectors:
-            if cls:
-                cards = soup.find_all(tag, class_=cls)
-            else:
-                cards = soup.find_all(tag)
-            
-            # Фильтруем по размеру текста (карточки событий обычно имеют определённый размер)
-            meaningful = [c for c in cards if 50 < len(c.get_text()) < 2000]
-            
-            if len(meaningful) >= 3:
-                event_cards = meaningful[:15]
-                log(f"✅ [karnet] Найдено карточек: {len(event_cards)} (селектор: {tag}.{cls or '*'})")
-                break
-        
-        if not event_cards:
-            # Альтернатива: ищем все ссылки на события
+        if not cards:
             links = soup.find_all('a', href=True)
-            event_links = []
-            for link in links:
+            for link in links[:15]:
                 href = link.get('href', '')
                 text = link.get_text().strip()
                 if '/wydarzenie' in href or '/event' in href:
-                    if text and 5 < len(text) < 150:
-                        event_links.append({'title': text, 'link': href})
-            
-            if event_links:
-                log(f"✅ [karnet] Найдено ссылок на события: {len(event_links)}")
-                for item in event_links[:10]:
-                    events.append({
-                        'title': item['title'],
-                        'date': 'Дата уточняется',
-                        'venue': '📍 Krakow',
-                        'link': item['link'] if item['link'].startswith('http') else 'https://karnet.krakowculture.pl' + item['link'],
-                        'source': 'karnet',
-                        'is_free': True  # Мы же фильтруем по бесплатным в URL
-                    })
-                return events[:10]
-            else:
-                log("⚠️ [karnet] Не найдено событий")
-                return events
+                    if 5 < len(text) < 150:
+                        events.append({
+                            'title': text,
+                            'date': 'Дата уточняется',
+                            'venue': '📍 Krakow',
+                            'link': href if href.startswith('http') else 'https://karnet.krakowculture.pl' + href,
+                            'source': 'karnet',
+                            'image': None
+                        })
+            return events[:10]
         
-        # Парсим каждую карточку
-        for card in event_cards:
+        for card in cards[:15]:
             try:
                 # Заголовок
                 title = None
@@ -145,8 +118,8 @@ def get_karnet_events():
                         title = elem.get_text().strip()
                         break
                 
-                if not title or len(title) < 3 or len(title) > 150:
-                    title = card.get_text().strip()[:100]
+                if not title or len(title) < 3:
+                    continue
                 
                 # Ссылка
                 link = '#'
@@ -156,41 +129,81 @@ def get_karnet_events():
                     if not link.startswith('http'):
                         link = 'https://karnet.krakowculture.pl' + link
                 
-                # Дата (ищем паттерн в тексте)
+                # Изображение
+                image = None
+                img_tag = card.find('img')
+                if img_tag:
+                    image = img_tag.get('src') or img_tag.get('data-src')
+                    if image and not image.startswith('http'):
+                        image = 'https://karnet.krakowculture.pl' + image
+                
+                # Текст карточки
                 text = card.get_text()
+                
+                # Дата
                 date_pattern = r'(\d{2}\.\d{2}\.\d{4})'
                 dates = re.findall(date_pattern, text)
-                date = dates[0] if dates else 'Дата уточняется'
+                
+                valid_date = None
+                for d in dates:
+                    try:
+                        event_date = datetime.strptime(d, '%d.%m.%Y').date()
+                        if event_date >= today:
+                            valid_date = d
+                            break
+                    except:
+                        continue
+                
+                if not valid_date:
+                    valid_date = 'Дата уточняется'
                 
                 # Время
                 time_pattern = r'(\d{2}:\d{2})'
                 times = re.findall(time_pattern, text)
                 if times:
-                    date = f"{date} {times[0]}"
+                    valid_date = f"{valid_date} {times[0]}"
                 
-                # Место
+                # Адрес
                 venue = '📍 Krakow'
-                venue_patterns = [r'ul\.\s*[\w\s]+', r'pl\.\s*[\w\s]+', r'aleja\s*[\w\s]+']
-                for pattern in venue_patterns:
+                address_patterns = [
+                    r'ul\.\s*[\w\s]+?\d+',
+                    r'pl\.\s*[\w\s]+?\d+',
+                    r'aleja\s*[\w\s]+?\d+',
+                    r'ul\.\s*[\w\s]+',
+                ]
+                for pattern in address_patterns:
                     match = re.search(pattern, text, re.IGNORECASE)
                     if match:
-                        venue = match.group(0)[:50]
+                        addr = match.group(0).strip()
+                        addr = re.sub(r'\s+\d+\s*$', '', addr)
+                        addr = addr.replace('\n', ' ').strip()
+                        if 5 < len(addr) < 60:
+                            venue = addr
                         break
                 
+                # Пропускаем прошлые даты
+                if valid_date != 'Дата уточняется':
+                    try:
+                        event_date = datetime.strptime(valid_date.split()[0], '%d.%m.%Y').date()
+                        if event_date < today:
+                            continue
+                    except:
+                        pass
+                
                 events.append({
-                    'title': title,
-                    'date': date,
-                    'venue': venue,
+                    'title': title[:100],
+                    'date': valid_date,
+                    'venue': venue[:50],
                     'link': link,
                     'source': 'karnet',
-                    'is_free': True
+                    'image': image
                 })
                 
             except Exception as e:
-                log(f"⚠️ [karnet] Ошибка разбора карточки: {e}")
+                log(f"⚠️ [karnet] Ошибка: {e}")
                 continue
         
-        log(f"🎫 [karnet] Найдено событий: {len(events)}")
+        log(f"🎫 [karnet] Найдено: {len(events)}")
         
     except Exception as e:
         log(f"❌ [karnet] Критическая ошибка: {e}")
@@ -198,10 +211,10 @@ def get_karnet_events():
     return events
 
 # =============================================================================
-# ИСТОЧНИК 2: EVENTBRITE
+# ИСТОЧНИК 2: EVENTBRITE (с картинками)
 # =============================================================================
 def get_eventbrite_events():
-    """Получает бесплатные события из Eventbrite"""
+    """Получает бесплатные события из Eventbrite с изображениями"""
     events = []
     now = datetime.now()
     
@@ -232,8 +245,7 @@ def get_eventbrite_events():
             return events
         
         data = response.json()
-        raw_count = len(data.get('events', []))
-        log(f"✅ [Eventbrite] Найдено событий: {raw_count}")
+        log(f"✅ [Eventbrite] Найдено событий: {len(data.get('events', []))}")
         
         for event in data.get('events', [])[:10]:
             try:
@@ -258,18 +270,23 @@ def get_eventbrite_events():
                     venue_name = 'Онлайн'
                     is_online = True
                 
-                if is_online or 'online' in venue_name.lower():
+                if is_online or 'online' in str(venue_name).lower():
                     venue_name = "🌐 Онлайн"
+                
+                # Изображение
+                image = event.get('logo', {})
+                image_url = image.get('url', None) if image else None
                 
                 events.append({
                     'title': title,
                     'date': start or 'Дата уточняется',
                     'venue': venue_name,
                     'link': url,
-                    'source': 'Eventbrite'
+                    'source': 'Eventbrite',
+                    'image': image_url
                 })
             except Exception as e:
-                log(f"⚠️ [Eventbrite] Ошибка разбора: {e}")
+                log(f"⚠️ [Eventbrite] Ошибка: {e}")
         
         log(f"🎫 [Eventbrite] Бесплатных: {len(events)}")
         
@@ -317,6 +334,12 @@ def get_meetup_events():
                 if link.startswith('/'):
                     link = 'https://www.meetup.com' + link
                 
+                # Изображение
+                image = None
+                img_tag = card.find('img')
+                if img_tag:
+                    image = img_tag.get('src') or img_tag.get('data-src')
+                
                 time_elem = card.find('time')
                 date = time_elem.get('datetime', 'Дата не указана') if time_elem else 'Дата не указана'
                 if date and 'T' in date:
@@ -333,12 +356,13 @@ def get_meetup_events():
                         'date': date,
                         'venue': venue,
                         'link': link,
-                        'source': 'Meetup'
+                        'source': 'Meetup',
+                        'image': image
                     })
                     log(f"🎫 [Meetup] + {title[:40]}...")
                 
             except Exception as e:
-                log(f"⚠️ [Meetup] Ошибка разбора: {e}")
+                log(f"⚠️ [Meetup] Ошибка: {e}")
                 continue
         
         log(f"🎫 [Meetup] Найдено: {len(events)}")
@@ -387,17 +411,6 @@ def get_krakow_travel_events():
                 break
         
         if not event_cards:
-            links = soup.find_all('a', href=True)
-            for link in links[:20]:
-                href = link['href']
-                if '/event' in href or '/events' in href:
-                    title = link.get_text().strip()
-                    if len(title) > 5 and len(title) < 100:
-                        event_cards = links[:10]
-                        log(f"✅ [krakow.travel] Найдено ссылок: {len(event_cards)}")
-                        break
-        
-        if not event_cards:
             log("⚠️ [krakow.travel] Не найдено событий")
             return events
         
@@ -424,6 +437,14 @@ def get_krakow_travel_events():
                 elif not link.startswith('http'):
                     link = 'https://krakow.travel/en/events/' + link
                 
+                # Изображение
+                image = None
+                img_tag = card.find('img')
+                if img_tag:
+                    image = img_tag.get('src') or img_tag.get('data-src')
+                    if image and not image.startswith('http'):
+                        image = 'https://krakow.travel' + image
+                
                 date_pattern = r'\d{2}\.\d{2}\.\d{4}'
                 dates = re.findall(date_pattern, card.get_text()) if hasattr(card, 'get_text') else []
                 date = dates[0] if dates else "Дата не указана"
@@ -439,11 +460,12 @@ def get_krakow_travel_events():
                     'venue': '📍 Krakow',
                     'link': link,
                     'source': 'krakow.travel',
-                    'is_free': is_free
+                    'is_free': is_free,
+                    'image': image
                 })
                 
             except Exception as e:
-                log(f"⚠️ [krakow.travel] Ошибка разбора: {e}")
+                log(f"⚠️ [krakow.travel] Ошибка: {e}")
                 continue
         
         free_events = [e for e in events if e.get('is_free', False)]
@@ -457,29 +479,97 @@ def get_krakow_travel_events():
     return events
 
 # =============================================================================
-# ОТПРАВКА В TELEGRAM
+# ОТПРАВКА В TELEGRAM (с группировкой по датам и картинками)
 # =============================================================================
-def send_telegram_message(message):
+def send_telegram_message_with_photo(events_by_date):
+    """Отправляет сообщение с группировкой по датам и первым изображением"""
     if not TELEGRAM_TOKEN or not CHAT_ID:
         log("❌ Ошибка: не задан TELEGRAM_TOKEN или CHAT_ID")
         return False
+    
+    # Находим первое событие с картинкой для отправки как фото
+    cover_image = None
+    for date, events in events_by_date.items():
+        for event in events:
+            if event.get('image'):
+                cover_image = event['image']
+                break
+        if cover_image:
+            break
+    
+    # Формируем текст сообщения
+    message = f"🎭 <b>Бесплатные события в Кракове</b>\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
+    
+    for date, events in events_by_date.items():
+        # Добавляем день недели
+        day_of_week = get_day_of_week(date)
+        date_header = f"{date}"
+        if day_of_week:
+            date_header += f" ({day_of_week})"
         
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    params = {
-        'chat_id': CHAT_ID,
-        'text': message,
-        'parse_mode': 'HTML',
-        'disable_web_page_preview': True
-    }
+        message += f"━━━━━━━━━━━━━━━━━━━━━\n"
+        message += f"📆 <b>{date_header}</b>\n"
+        message += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for event in events:
+            title = event['title'].replace('<', '&lt;').replace('>', '&gt;')
+            source_icon = {
+                'karnet': '🟣',
+                'Eventbrite': '🟠', 
+                'Meetup': '🔵', 
+                'krakow.travel': '🟢'
+            }.get(event['source'], '⚪')
+            
+            # Форматируем время
+            time_str = ''
+            if ' ' in event['date']:
+                time_str = event['date'].split()[1]
+            
+            # Кликабельный адрес
+            venue = event.get('venue', '📍 Krakow')
+            maps_link = make_google_maps_link(venue)
+            if maps_link:
+                venue_display = f"<a href='{maps_link}'>{venue}</a>"
+            else:
+                venue_display = venue
+            
+            message += f"{source_icon} <b>{title}</b>\n"
+            message += f"🕐 {time_str} | 📍 {venue_display}\n"
+            message += f"🔗 <a href='{event['link']}'>Подробнее</a>\n\n"
+    
+    message += "<i>Источники: karnet • Eventbrite • Meetup • krakow.travel</i>"
+    
     try:
         log(f"📤 Отправляем сообщение в Telegram...")
-        response = requests.post(url, params=params, timeout=10)
+        
+        if cover_image:
+            # Отправляем как фото с подписью
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+            params = {
+                'chat_id': CHAT_ID,
+                'photo': cover_image,
+                'caption': message,
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True
+            }
+        else:
+            # Отправляем как текст
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            params = {
+                'chat_id': CHAT_ID,
+                'text': message,
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True
+            }
+        
+        response = requests.post(url, params=params, timeout=15)
         if response.status_code == 200:
             log("✅ Сообщение отправлено успешно!")
             return True
         else:
             log(f"❌ Telegram API: {response.status_code} | {response.text}")
             return False
+            
     except Exception as e:
         log(f"❌ Ошибка отправки: {e}")
         return False
@@ -492,19 +582,16 @@ def main():
     
     all_events = []
     
-    # 1. Karnet (приоритетный источник)
+    # Собираем из всех источников
     karnet = get_karnet_events()
     all_events.extend(karnet)
     
-    # 2. Eventbrite
     eventbrite = get_eventbrite_events()
     all_events.extend(eventbrite)
     
-    # 3. Meetup
     meetup = get_meetup_events()
     all_events.extend(meetup)
     
-    # 4. krakow.travel
     krakow = get_krakow_travel_events()
     all_events.extend(krakow)
     
@@ -514,7 +601,7 @@ def main():
     log(f"   • Meetup: {len(meetup)}")
     log(f"   • krakow.travel: {len(krakow)}")
     
-    # Удаляем дубликаты по заголовку
+    # Удаляем дубликаты
     seen = set()
     unique_events = []
     for e in all_events:
@@ -528,28 +615,26 @@ def main():
     if not unique_events:
         log("⚠️ События не найдены ни в одном источнике")
         message = "🔍 На ближайшие 3 недели событий не найдено.\n\n<i>Попробуйте позже!</i>"
-        send_telegram_message(message)
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        params = {'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
+        requests.post(url, params=params, timeout=10)
         return
     
-    # Формируем сообщение (максимум 20 событий)
-    message = f"🎭 <b>Бесплатные события в Кракове</b>\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
+    # Сортируем по дате
+    unique_events.sort(key=lambda x: parse_date_for_sorting(x['date']))
     
-    for i, e in enumerate(unique_events[:20], 1):
-        title = e['title'].replace('<', '&lt;').replace('>', '&gt;')
-        source_icon = {
-            'karnet': '🟣',
-            'Eventbrite': '🟠', 
-            'Meetup': '🔵', 
-            'krakow.travel': '🟢'
-        }.get(e['source'], '⚪')
-        
-        message += f"{i}. {source_icon} <b>{title}</b>\n"
-        message += f"🗓 {e['date']} | {e['venue']}\n"
-        message += f"🔗 <a href='{e['link']}'>Подробнее</a>\n\n"
+    # Группируем по датам
+    events_by_date = {}
+    for event in unique_events[:20]:  # Максимум 20 событий
+        date_key = event['date'].split()[0] if ' ' in event['date'] else event['date']
+        if date_key not in events_by_date:
+            events_by_date[date_key] = []
+        events_by_date[date_key].append(event)
     
-    message += "<i>Источники: karnet • Eventbrite • Meetup • krakow.travel</i>"
+    log(f"📊 Группировка по датам: {len(events_by_date)} дней")
     
-    send_telegram_message(message)
+    send_telegram_message_with_photo(events_by_date)
 
 if __name__ == '__main__':
     main()
